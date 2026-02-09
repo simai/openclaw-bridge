@@ -45,7 +45,7 @@ function buildSessionRouting(payload = {}) {
 }
 
 function fallbackReply() {
-  return 'Я не выполняю команды на сервере и не делаю системные действия из чата Bitrix. Могу помочь только инструкцией/шагами.';
+  return 'Отказ: выполнение серверных команд и системных действий из чата Bitrix запрещено политикой безопасности.';
 }
 
 function isUnsafeToolRequest(payload = {}) {
@@ -160,7 +160,7 @@ app.post('/v1/inbound', async (req, res) => {
 
   if (isUnsafeToolRequest(payload)) {
     return res.json({
-      reply: 'Откажу: я не выполняю команды на сервере, не читаю системные файлы и не изменяю код по сообщениям из Bitrix. Могу дать безопасную инструкцию, как сделать это вручную.',
+      reply: 'Отказ: выполнение серверных команд, чтение системных файлов и изменение кода из чата Bitrix запрещены политикой безопасности.',
       sessionKey,
       routedBy,
       chatTypeSeen,
