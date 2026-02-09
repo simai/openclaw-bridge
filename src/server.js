@@ -10,7 +10,7 @@ const PORT = Number(process.env.PORT || 8787);
 const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || '';
 const SMART_UPSTREAM_URL = process.env.SMART_UPSTREAM_URL || '';
 const SMART_UPSTREAM_TOKEN = process.env.SMART_UPSTREAM_TOKEN || '';
-const OPENCLAW_AGENT_TIMEOUT_MS = Number(process.env.OPENCLAW_AGENT_TIMEOUT_MS || 9000);
+const OPENCLAW_AGENT_TIMEOUT_MS = Number(process.env.OPENCLAW_AGENT_TIMEOUT_MS || 30000);
 
 /** @type {Map<string, {createdAt:string,lastAt:string,count:number,lastText:string}>} */
 const sessionState = new Map();
@@ -81,14 +81,14 @@ async function getSmartReply(payload, sessionKey, expertId = 'general') {
       const { stdout } = await execFileAsync(
         'openclaw',
         ['gateway', 'call', 'agent', '--json', '--expect-final', '--timeout', String(OPENCLAW_AGENT_TIMEOUT_MS), '--params', params],
-        { timeout: OPENCLAW_AGENT_TIMEOUT_MS + 3000 },
+        { timeout: OPENCLAW_AGENT_TIMEOUT_MS + 3000, maxBuffer: 20 * 1024 * 1024 },
       );
       const parsed = JSON.parse(stdout || '{}');
       const reply = String((parsed?.result?.payloads || []).map(p => p?.text || '').filter(Boolean).join('\n')).trim();
       if (reply) return { reply, smartMode: 'openclaw-cli' };
       return { reply: fallbackReply(payload), smartMode: 'fallback-openclaw-empty' };
-    } catch (_e) {
-      return { reply: fallbackReply(payload), smartMode: 'fallback-openclaw-error' };
+    } catch (e) {
+      return { reply: fallbackReply(payload), smartMode: 'fallback-openclaw-error', smartError: String(e?.message || e) };
     }
   }
 
@@ -158,6 +158,7 @@ app.post('/v1/inbound', async (req, res) => {
     routedBy,
     chatTypeSeen,
     smartMode: smart.smartMode,
+    smartError: smart.smartError || null,
     expertId: routing.expertId,
     routerReason: routing.reason,
     messageCount: next.count,
