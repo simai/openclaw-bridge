@@ -44,11 +44,17 @@ function buildSessionRouting(payload = {}) {
   };
 }
 
-function fallbackReply({ domain = '', authorId = '', dialogId = '', text = '' }) {
-  const clean = String(text || '').trim();
-  return clean
-    ? `Принял (${domain}/${authorId}/${dialogId}). Сообщение: ${clean}`
-    : 'Принял 👍 Работаю над ответом.';
+function fallbackReply() {
+  return 'Я не выполняю команды на сервере и не делаю системные действия из чата Bitrix. Могу помочь только инструкцией/шагами.';
+}
+
+function isUnsafeToolRequest(payload = {}) {
+  const text = String(payload.text || '').toLowerCase();
+  return [
+    'выполни команд', 'запусти команд', 'shell', 'bash', 'sh ', 'ssh',
+    'ls /', 'cat /', 'rm ', 'sudo', 'systemctl', 'docker ', 'kubectl',
+    'измени файл', 'отредактируй файл', 'покажи /root', 'покажи содержимое /root'
+  ].some((k) => text.includes(k));
 }
 
 function selectExpert(payload = {}) {
@@ -151,6 +157,22 @@ app.post('/v1/inbound', async (req, res) => {
   sessionState.set(sessionKey, next);
 
   const routing = selectExpert(payload);
+
+  if (isUnsafeToolRequest(payload)) {
+    return res.json({
+      reply: 'Откажу: я не выполняю команды на сервере, не читаю системные файлы и не изменяю код по сообщениям из Bitrix. Могу дать безопасную инструкцию, как сделать это вручную.',
+      sessionKey,
+      routedBy,
+      chatTypeSeen,
+      smartMode: 'policy-blocked',
+      smartError: null,
+      expertId: routing.expertId,
+      agentId: routing.agentId,
+      routerReason: 'policy-unsafe-tool-request',
+      messageCount: next.count,
+    });
+  }
+
   const smart = await getSmartReply(payload, sessionKey, routing.expertId, routing.agentId);
 
   return res.json({
