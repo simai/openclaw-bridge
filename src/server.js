@@ -1,4 +1,6 @@
 const express = require('express');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -8,9 +10,11 @@ const PORT = Number(process.env.PORT || 8787);
 const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || '';
 const SMART_UPSTREAM_URL = process.env.SMART_UPSTREAM_URL || '';
 const SMART_UPSTREAM_TOKEN = process.env.SMART_UPSTREAM_TOKEN || '';
+const OPENCLAW_AGENT_TIMEOUT_MS = Number(process.env.OPENCLAW_AGENT_TIMEOUT_MS || 9000);
 
 /** @type {Map<string, {createdAt:string,lastAt:string,count:number,lastText:string}>} */
 const sessionState = new Map();
+const execFileAsync = promisify(execFile);
 
 function authOk(req) {
   if (!BRIDGE_TOKEN) return true;
@@ -49,7 +53,25 @@ function fallbackReply({ domain = '', authorId = '', dialogId = '', text = '' })
 
 async function getSmartReply(payload, sessionKey) {
   if (!SMART_UPSTREAM_URL) {
-    return { reply: fallbackReply(payload), smartMode: 'fallback-no-upstream' };
+    // Local smart mode via OpenClaw CLI (no extra URL config required)
+    try {
+      const params = JSON.stringify({
+        idempotencyKey: `b24-${Date.now()}`,
+        sessionKey,
+        message: String(payload.text || '').trim(),
+      });
+      const { stdout } = await execFileAsync(
+        'openclaw',
+        ['gateway', 'call', 'agent', '--json', '--expect-final', '--timeout', String(OPENCLAW_AGENT_TIMEOUT_MS), '--params', params],
+        { timeout: OPENCLAW_AGENT_TIMEOUT_MS + 3000 },
+      );
+      const parsed = JSON.parse(stdout || '{}');
+      const reply = String((parsed?.result?.payloads || []).map(p => p?.text || '').filter(Boolean).join('\n')).trim();
+      if (reply) return { reply, smartMode: 'openclaw-cli' };
+      return { reply: fallbackReply(payload), smartMode: 'fallback-openclaw-empty' };
+    } catch (_e) {
+      return { reply: fallbackReply(payload), smartMode: 'fallback-openclaw-error' };
+    }
   }
 
   const controller = new AbortController();
@@ -71,10 +93,7 @@ async function getSmartReply(payload, sessionKey) {
     try { data = JSON.parse(raw); } catch (_) {}
 
     if (!response.ok) {
-      return {
-        reply: fallbackReply(payload),
-        smartMode: `fallback-upstream-http-${response.status}`,
-      };
+      return { reply: fallbackReply(payload), smartMode: `fallback-upstream-http-${response.status}` };
     }
 
     const reply = String((data && data.reply) || '').trim();
