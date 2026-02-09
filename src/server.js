@@ -11,6 +11,32 @@ const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || '';
 const SMART_UPSTREAM_URL = process.env.SMART_UPSTREAM_URL || '';
 const SMART_UPSTREAM_TOKEN = process.env.SMART_UPSTREAM_TOKEN || '';
 const OPENCLAW_AGENT_TIMEOUT_MS = Number(process.env.OPENCLAW_AGENT_TIMEOUT_MS || 30000);
+const DB_ENABLED = String(process.env.DB_ENABLED || '1') === '1';
+
+let dbPool = null;
+let dbInitAttempted = false;
+async function getDbPool() {
+  if (!DB_ENABLED) return null;
+  if (dbPool) return dbPool;
+  if (dbInitAttempted) return null;
+  dbInitAttempted = true;
+  try {
+    const mysql = require('mysql2/promise');
+    dbPool = mysql.createPool({
+      host: process.env.DB_HOST || '127.0.0.1',
+      port: Number(process.env.DB_PORT || 3306),
+      user: process.env.DB_USER || 'b24_openclaw',
+      password: process.env.DB_PASS || '',
+      database: process.env.DB_NAME || 'b24_openclaw',
+      waitForConnections: true,
+      connectionLimit: 5,
+    });
+    return dbPool;
+  } catch (e) {
+    console.warn('[db] disabled/unavailable:', String(e?.message || e));
+    return null;
+  }
+}
 
 /** @type {Map<string, {createdAt:string,lastAt:string,count:number,lastText:string}>} */
 const sessionState = new Map();
@@ -45,7 +71,7 @@ function buildSessionRouting(payload = {}) {
 }
 
 function fallbackReply() {
-  return 'Отказ: выполнение серверных команд и системных действий из чата Bitrix запрещено политикой безопасности.';
+  return 'Сообщение получил. Сейчас временная ошибка обработки, попробуйте ещё раз через пару секунд.';
 }
 
 function isUnsafeToolRequest(payload = {}) {
@@ -72,6 +98,63 @@ function selectExpert(payload = {}) {
   }
 
   return { expertId: 'general', agentId: 'bitrix-router', reason: 'default-general' };
+}
+
+async function persistDbAudit(payload, sessionKey, routing, smartMode, failureClass, latencyMs, chatTypeSeen) {
+  const pool = await getDbPool();
+  if (!pool) return;
+
+  const domain = String(payload?.domain || '').trim();
+  if (!domain) return;
+  const dialogId = String(payload?.dialogId || '').trim();
+  const authorId = String(payload?.authorId || '').trim();
+  const isGroup = chatTypeSeen === 'C' || chatTypeSeen === 'G' || dialogId.toLowerCase().startsWith('chat');
+  const scopeType = isGroup ? 'group' : 'private';
+  const scopeKey = isGroup ? (dialogId || authorId || 'unknown') : (authorId || dialogId || 'unknown');
+
+  let conn = null;
+  try {
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    await conn.execute(
+      'INSERT INTO tenants(domain, status) VALUES (?, "active") ON DUPLICATE KEY UPDATE updated_at=CURRENT_TIMESTAMP',
+      [domain],
+    );
+
+    const [tenantRows] = await conn.execute('SELECT id FROM tenants WHERE domain=? LIMIT 1', [domain]);
+    const tenantId = tenantRows?.[0]?.id;
+    if (!tenantId) throw new Error('tenant not found');
+
+    await conn.execute(
+      `INSERT INTO conversations(tenant_id, scope_type, scope_key, session_key, last_message_at, last_agent_id, last_expert_id, state_json)
+       VALUES(?, ?, ?, ?, NOW(), ?, ?, NULL)
+       ON DUPLICATE KEY UPDATE
+         last_message_at=VALUES(last_message_at),
+         last_agent_id=VALUES(last_agent_id),
+         last_expert_id=VALUES(last_expert_id),
+         updated_at=CURRENT_TIMESTAMP`,
+      [tenantId, scopeType, scopeKey, sessionKey, routing.agentId || null, routing.expertId || null],
+    );
+
+    const [convRows] = await conn.execute('SELECT id FROM conversations WHERE session_key=? LIMIT 1', [sessionKey]);
+    const conversationId = convRows?.[0]?.id || null;
+
+    await conn.execute(
+      `INSERT INTO routing_audit(tenant_id, conversation_id, request_id, router_reason, expert_id, agent_id, smart_mode, failure_class, latency_ms)
+       VALUES(?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+      [tenantId, conversationId, routing.reason || null, routing.expertId || null, routing.agentId || null, smartMode || null, failureClass || null, latencyMs || null],
+    );
+
+    await conn.commit();
+  } catch (e) {
+    if (conn) {
+      try { await conn.rollback(); } catch (_) {}
+    }
+    console.warn('[db] audit write failed:', String(e?.message || e));
+  } finally {
+    if (conn) conn.release();
+  }
 }
 
 async function getSmartReply(payload, sessionKey, expertId = 'general', agentId = 'bitrix-router') {
@@ -157,8 +240,11 @@ app.post('/v1/inbound', async (req, res) => {
   sessionState.set(sessionKey, next);
 
   const routing = selectExpert(payload);
+  const t0 = Date.now();
 
   if (isUnsafeToolRequest(payload)) {
+    const blockedRouting = { ...routing, reason: 'policy-unsafe-tool-request' };
+    await persistDbAudit(payload, sessionKey, blockedRouting, 'policy-blocked', null, Date.now() - t0, chatTypeSeen);
     return res.json({
       reply: 'Отказ: выполнение серверных команд, чтение системных файлов и изменение кода из чата Bitrix запрещены политикой безопасности.',
       sessionKey,
@@ -174,6 +260,7 @@ app.post('/v1/inbound', async (req, res) => {
   }
 
   const smart = await getSmartReply(payload, sessionKey, routing.expertId, routing.agentId);
+  await persistDbAudit(payload, sessionKey, routing, smart.smartMode, smart.smartError ? 'smart_error' : null, Date.now() - t0, chatTypeSeen);
 
   return res.json({
     reply: smart.reply,
