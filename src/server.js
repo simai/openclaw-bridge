@@ -162,20 +162,20 @@ async function getSmartReply(payload, sessionKey, expertId = 'general', agentId 
     // Local smart mode via OpenClaw CLI (no extra URL config required)
     try {
       const expertSessionKey = `agent:${agentId}:${sessionKey}:expert:${expertId}`;
-      const params = JSON.stringify({
-        idempotencyKey: `b24-${Date.now()}`,
-        agentId,
-        sessionKey: expertSessionKey,
-        message: String(payload.text || '').trim(),
-      });
       const { stdout } = await execFileAsync(
         'openclaw',
-        ['gateway', 'call', 'agent', '--json', '--expect-final', '--timeout', String(OPENCLAW_AGENT_TIMEOUT_MS), '--params', params],
-        { timeout: OPENCLAW_AGENT_TIMEOUT_MS + 3000, maxBuffer: 20 * 1024 * 1024 },
+        [
+          'agent', '--local', '--json',
+          '--agent', agentId,
+          '--session-id', expertSessionKey,
+          '--message', String(payload.text || '').trim(),
+          '--timeout', String(Math.max(10, Math.ceil(OPENCLAW_AGENT_TIMEOUT_MS / 1000))),
+        ],
+        { timeout: OPENCLAW_AGENT_TIMEOUT_MS + 5000, maxBuffer: 20 * 1024 * 1024 },
       );
       const parsed = JSON.parse(stdout || '{}');
-      const reply = String((parsed?.result?.payloads || []).map(p => p?.text || '').filter(Boolean).join('\n')).trim();
-      if (reply) return { reply, smartMode: 'openclaw-cli' };
+      const reply = String((parsed?.payloads || []).map(p => p?.text || '').filter(Boolean).join('\n')).trim();
+      if (reply) return { reply, smartMode: 'openclaw-agent-local' };
       return { reply: fallbackReply(payload), smartMode: 'fallback-openclaw-empty' };
     } catch (e) {
       return { reply: fallbackReply(payload), smartMode: 'fallback-openclaw-error', smartError: String(e?.message || e) };
