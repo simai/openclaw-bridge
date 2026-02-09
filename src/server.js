@@ -16,12 +16,28 @@ function authOk(req) {
   return h === `Bearer ${BRIDGE_TOKEN}`;
 }
 
-function buildSessionKey(payload = {}) {
+function buildSessionRouting(payload = {}) {
   const domain = String(payload.domain || 'unknown-domain').trim() || 'unknown-domain';
   const authorId = String(payload.authorId || '').trim();
   const dialogId = String(payload.dialogId || '').trim();
+  const chatType = String(payload.chatType || '').trim().toUpperCase();
+
+  // Hybrid mode:
+  // - private chats: isolate by user
+  // - group chats: isolate by group dialog
+  if (chatType === 'G') {
+    const chatPart = dialogId || authorId || 'unknown-chat';
+    return {
+      sessionKey: `bitrix:${domain}:chat:${chatPart}`,
+      routedBy: 'domain+dialogId',
+    };
+  }
+
   const userPart = authorId || dialogId || 'unknown-user';
-  return `bitrix:${domain}:${userPart}`;
+  return {
+    sessionKey: `bitrix:${domain}:${userPart}`,
+    routedBy: 'domain+authorId',
+  };
 }
 
 app.get('/health', (_req, res) => {
@@ -34,9 +50,9 @@ app.post('/v1/inbound', (req, res) => {
   const payload = req.body || {};
   const { domain = '', authorId = '', dialogId = '', text = '' } = payload;
   const clean = String(text || '').trim();
+  const chatTypeSeen = String(payload.chatType || '').trim().toUpperCase();
 
-  // Hard tenant routing key: one session per portal+user
-  const sessionKey = buildSessionKey(payload);
+  const { sessionKey, routedBy } = buildSessionRouting(payload);
 
   const now = new Date().toISOString();
   const prev = sessionState.get(sessionKey);
@@ -55,7 +71,8 @@ app.post('/v1/inbound', (req, res) => {
   return res.json({
     reply,
     sessionKey,
-    routedBy: 'domain+authorId',
+    routedBy,
+    chatTypeSeen,
     messageCount: next.count,
   });
 });
