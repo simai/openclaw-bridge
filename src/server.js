@@ -21,11 +21,12 @@ function buildSessionRouting(payload = {}) {
   const authorId = String(payload.authorId || '').trim();
   const dialogId = String(payload.dialogId || '').trim();
   const chatType = String(payload.chatType || '').trim().toUpperCase();
+  const isGroupByDialog = dialogId.toLowerCase().startsWith('chat');
 
   // Hybrid mode:
   // - private chats: isolate by user
   // - group chats: isolate by group dialog
-  if (chatType === 'G' || chatType === 'C') {
+  if (chatType === 'G' || chatType === 'C' || isGroupByDialog) {
     const chatPart = dialogId || authorId || 'unknown-chat';
     return {
       sessionKey: `bitrix:${domain}:chat:${chatPart}`,
