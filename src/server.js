@@ -7,10 +7,21 @@ const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8787);
 const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || '';
 
+/** @type {Map<string, {createdAt:string,lastAt:string,count:number,lastText:string}>} */
+const sessionState = new Map();
+
 function authOk(req) {
   if (!BRIDGE_TOKEN) return true;
   const h = req.headers.authorization || '';
   return h === `Bearer ${BRIDGE_TOKEN}`;
+}
+
+function buildSessionKey(payload = {}) {
+  const domain = String(payload.domain || 'unknown-domain').trim() || 'unknown-domain';
+  const authorId = String(payload.authorId || '').trim();
+  const dialogId = String(payload.dialogId || '').trim();
+  const userPart = authorId || dialogId || 'unknown-user';
+  return `bitrix:${domain}:${userPart}`;
 }
 
 app.get('/health', (_req, res) => {
@@ -20,14 +31,33 @@ app.get('/health', (_req, res) => {
 app.post('/v1/inbound', (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
 
-  const { domain = '', authorId = '', dialogId = '', text = '' } = req.body || {};
+  const payload = req.body || {};
+  const { domain = '', authorId = '', dialogId = '', text = '' } = payload;
   const clean = String(text || '').trim();
+
+  // Hard tenant routing key: one session per portal+user
+  const sessionKey = buildSessionKey(payload);
+
+  const now = new Date().toISOString();
+  const prev = sessionState.get(sessionKey);
+  const next = {
+    createdAt: prev?.createdAt || now,
+    lastAt: now,
+    count: (prev?.count || 0) + 1,
+    lastText: clean,
+  };
+  sessionState.set(sessionKey, next);
 
   const reply = clean
     ? `Принял (${domain}/${authorId}/${dialogId}). Сообщение: ${clean}`
     : 'Принял 👍 Работаю над ответом.';
 
-  return res.json({ reply });
+  return res.json({
+    reply,
+    sessionKey,
+    routedBy: 'domain+authorId',
+    messageCount: next.count,
+  });
 });
 
 app.listen(PORT, HOST, () => {
