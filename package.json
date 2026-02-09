@@ -1,0 +1,13 @@
+{
+  "name": "openclaw-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bridge API between Bitrix24 PHP app and OpenClaw",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
