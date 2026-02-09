@@ -56,25 +56,26 @@ function selectExpert(payload = {}) {
   const hasAny = (arr) => arr.some((w) => text.includes(w));
 
   if (hasAny(['ошибк', 'не работает', 'баг', 'problem', 'support', 'помоги'])) {
-    return { expertId: 'support', reason: 'support-keywords' };
+    return { expertId: 'support', agentId: 'bitrix-support', reason: 'support-keywords' };
   }
   if (hasAny(['цена', 'тариф', 'купить', 'оплат', 'коммерч', 'sales'])) {
-    return { expertId: 'sales', reason: 'sales-keywords' };
+    return { expertId: 'sales', agentId: 'bitrix-sales', reason: 'sales-keywords' };
   }
-  if (hasAny(['процесс', 'регламент', 'операц', 'внедрен', 'интеграц'])) {
-    return { expertId: 'ops', reason: 'ops-keywords' };
+  if (hasAny(['процесс', 'регламент', 'операц', 'внедрен', 'интеграц', 'деплой', 'разверт'])) {
+    return { expertId: 'ops', agentId: 'bitrix-ops', reason: 'ops-keywords' };
   }
 
-  return { expertId: 'general', reason: 'default-general' };
+  return { expertId: 'general', agentId: 'bitrix-router', reason: 'default-general' };
 }
 
-async function getSmartReply(payload, sessionKey, expertId = 'general') {
+async function getSmartReply(payload, sessionKey, expertId = 'general', agentId = 'bitrix-router') {
   if (!SMART_UPSTREAM_URL) {
     // Local smart mode via OpenClaw CLI (no extra URL config required)
     try {
-      const expertSessionKey = `${sessionKey}:expert:${expertId}`;
+      const expertSessionKey = `agent:${agentId}:${sessionKey}:expert:${expertId}`;
       const params = JSON.stringify({
         idempotencyKey: `b24-${Date.now()}`,
+        agentId,
         sessionKey: expertSessionKey,
         message: String(payload.text || '').trim(),
       });
@@ -150,7 +151,7 @@ app.post('/v1/inbound', async (req, res) => {
   sessionState.set(sessionKey, next);
 
   const routing = selectExpert(payload);
-  const smart = await getSmartReply(payload, sessionKey, routing.expertId);
+  const smart = await getSmartReply(payload, sessionKey, routing.expertId, routing.agentId);
 
   return res.json({
     reply: smart.reply,
@@ -160,6 +161,7 @@ app.post('/v1/inbound', async (req, res) => {
     smartMode: smart.smartMode,
     smartError: smart.smartError || null,
     expertId: routing.expertId,
+    agentId: routing.agentId,
     routerReason: routing.reason,
     messageCount: next.count,
   });
