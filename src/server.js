@@ -25,7 +25,7 @@ function buildSessionRouting(payload = {}) {
   // Hybrid mode:
   // - private chats: isolate by user
   // - group chats: isolate by group dialog
-  if (chatType === 'G') {
+  if (chatType === 'G' || chatType === 'C') {
     const chatPart = dialogId || authorId || 'unknown-chat';
     return {
       sessionKey: `bitrix:${domain}:chat:${chatPart}`,
