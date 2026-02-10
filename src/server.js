@@ -1,6 +1,7 @@
 const express = require('express');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const crypto = require('crypto');
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -12,6 +13,9 @@ const SMART_UPSTREAM_URL = process.env.SMART_UPSTREAM_URL || '';
 const SMART_UPSTREAM_TOKEN = process.env.SMART_UPSTREAM_TOKEN || '';
 const OPENCLAW_AGENT_TIMEOUT_MS = Number(process.env.OPENCLAW_AGENT_TIMEOUT_MS || 30000);
 const DB_ENABLED = String(process.env.DB_ENABLED || '1') === '1';
+const CONTEXT_SUMMARY_MAX_CHARS = Number(process.env.CONTEXT_SUMMARY_MAX_CHARS || 700);
+const CONTEXT_FACTS_MAX_ITEMS = Number(process.env.CONTEXT_FACTS_MAX_ITEMS || 6);
+const CONTEXT_FACT_VALUE_MAX_CHARS = Number(process.env.CONTEXT_FACT_VALUE_MAX_CHARS || 140);
 
 let dbPool = null;
 let dbInitAttempted = false;
@@ -72,6 +76,53 @@ function buildSessionRouting(payload = {}) {
 
 function fallbackReply() {
   return 'Сообщение получил. Сейчас временная ошибка обработки, попробуйте ещё раз через пару секунд.';
+}
+
+function trimTo(input, maxLen) {
+  const s = String(input || '').trim();
+  if (!s) return '';
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, Math.max(0, maxLen - 1))}…`;
+}
+
+function sanitizeFacts(rawFacts) {
+  if (!Array.isArray(rawFacts)) return [];
+  return rawFacts
+    .slice(0, Math.max(1, CONTEXT_FACTS_MAX_ITEMS))
+    .map((f) => ({
+      fact_key: trimTo(f?.fact_key || f?.key || '', 40),
+      fact_value: trimTo(f?.fact_value || f?.value || '', Math.max(40, CONTEXT_FACT_VALUE_MAX_CHARS)),
+      confidence: Number(f?.confidence || 0),
+    }))
+    .filter((f) => f.fact_key && f.fact_value);
+}
+
+function buildAugmentedMessage(payload = {}) {
+  const userText = trimTo(payload.text || '', 4000);
+  const summary = trimTo(payload.summary || '', Math.max(120, CONTEXT_SUMMARY_MAX_CHARS));
+  const facts = sanitizeFacts(payload.facts);
+
+  if (!summary && facts.length === 0) return userText;
+
+  const lines = [];
+  if (summary) lines.push(`Summary:\n${summary}`);
+  if (facts.length) {
+    lines.push('Known facts:');
+    for (const f of facts) {
+      const conf = Number.isFinite(f.confidence) ? ` (${f.confidence.toFixed(2)})` : '';
+      lines.push(`- ${f.fact_key}: ${f.fact_value}${conf}`);
+    }
+  }
+  lines.push(`User message:\n${userText}`);
+
+  return lines.join('\n\n');
+}
+
+function buildSafeExpertSessionKey(agentId, sessionKey, expertId) {
+  const raw = `agent:${agentId}:${sessionKey}:expert:${expertId}`;
+  if (raw.length <= 64) return raw;
+  const digest = crypto.createHash('sha1').update(raw).digest('hex').slice(0, 24);
+  return `ag:${agentId.slice(0, 12)}:${expertId.slice(0, 12)}:${digest}`;
 }
 
 function isUnsafeToolRequest(payload = {}) {
@@ -158,17 +209,19 @@ async function persistDbAudit(payload, sessionKey, routing, smartMode, failureCl
 }
 
 async function getSmartReply(payload, sessionKey, expertId = 'general', agentId = 'bitrix-router') {
+  const augmentedMessage = buildAugmentedMessage(payload);
+
   if (!SMART_UPSTREAM_URL) {
     // Local smart mode via OpenClaw CLI (no extra URL config required)
     try {
-      const expertSessionKey = `agent:${agentId}:${sessionKey}:expert:${expertId}`;
+      const expertSessionKey = buildSafeExpertSessionKey(agentId, sessionKey, expertId);
       const { stdout } = await execFileAsync(
         'openclaw',
         [
           'agent', '--local', '--json',
           '--agent', agentId,
           '--session-id', expertSessionKey,
-          '--message', String(payload.text || '').trim(),
+          '--message', augmentedMessage,
           '--timeout', String(Math.max(10, Math.ceil(OPENCLAW_AGENT_TIMEOUT_MS / 1000))),
         ],
         { timeout: OPENCLAW_AGENT_TIMEOUT_MS + 5000, maxBuffer: 20 * 1024 * 1024 },
@@ -192,7 +245,7 @@ async function getSmartReply(payload, sessionKey, expertId = 'general', agentId 
     const response = await fetch(SMART_UPSTREAM_URL, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ ...payload, sessionKey, expertId, source: 'bitrix24-bridge' }),
+      body: JSON.stringify({ ...payload, text: augmentedMessage, sessionKey, expertId, source: 'bitrix24-bridge' }),
       signal: controller.signal,
     });
 
