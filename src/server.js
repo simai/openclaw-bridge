@@ -285,6 +285,103 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'openclaw-bridge', timeUtc: new Date().toISOString() });
 });
 
+const CHANNEL_REQUEST_ID_TTL_MS = Number(process.env.CHANNEL_REQUEST_ID_TTL_MS || 5 * 60 * 1000);
+const CHANNEL_MAX_CLOCK_SKEW_SEC = Number(process.env.CHANNEL_MAX_CLOCK_SKEW_SEC || 300);
+/** @type {Map<string, {ts:number, response:any}>} */
+const channelIdempotency = new Map();
+
+function cleanupChannelIdempotency(nowMs = Date.now()) {
+  for (const [k, v] of channelIdempotency.entries()) {
+    if (!v || (nowMs - v.ts) > CHANNEL_REQUEST_ID_TTL_MS) channelIdempotency.delete(k);
+  }
+}
+
+function hmacHex(bodyText, secret) {
+  return crypto.createHmac('sha256', secret).update(bodyText).digest('hex');
+}
+
+function safeEqHex(a, b) {
+  const x = Buffer.from(String(a || ''), 'hex');
+  const y = Buffer.from(String(b || ''), 'hex');
+  if (x.length === 0 || y.length === 0 || x.length !== y.length) return false;
+  return crypto.timingSafeEqual(x, y);
+}
+
+function parseSig(headerValue = '') {
+  const s = String(headerValue || '').trim();
+  if (!s) return '';
+  if (s.startsWith('sha256=')) return s.slice('sha256='.length);
+  return s;
+}
+
+function uuidish(v) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(v || '').trim());
+}
+
+function validateChannelInbound(body) {
+  const requestId = String(body?.requestId || '').trim();
+  const domain = String(body?.tenant?.domain || '').trim();
+  const tenantChannelId = String(body?.tenant?.tenantChannelId || '').trim();
+  const authorId = String(body?.message?.authorId || '').trim();
+  const dialogId = String(body?.message?.dialogId || '').trim();
+  const text = String(body?.message?.text || '').trim();
+
+  if (!uuidish(requestId)) return { ok: false, code: 'INVALID_SCHEMA', message: 'requestId invalid' };
+  if (!domain) return { ok: false, code: 'INVALID_SCHEMA', message: 'tenant.domain missing' };
+  if (!authorId) return { ok: false, code: 'INVALID_SCHEMA', message: 'message.authorId missing' };
+  if (!dialogId) return { ok: false, code: 'INVALID_SCHEMA', message: 'message.dialogId missing' };
+  if (!text) return { ok: false, code: 'INVALID_SCHEMA', message: 'message.text missing' };
+
+  return { ok: true, requestId, domain, tenantChannelId, authorId, dialogId, text };
+}
+
+app.post('/v1/channel/inbound', async (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'unauthorized', retryable: false } });
+
+  const tsHeader = Number(req.headers['x-timestamp'] || 0);
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (!tsHeader || Math.abs(nowSec - tsHeader) > CHANNEL_MAX_CLOCK_SKEW_SEC) {
+    return res.status(401).json({ ok: false, error: { code: 'CLOCK_SKEW_EXCEEDED', message: 'invalid timestamp', retryable: false } });
+  }
+
+  const rawBody = JSON.stringify(req.body || {});
+  if (BRIDGE_TOKEN) {
+    const got = parseSig(req.headers['x-channel-signature']);
+    const exp = hmacHex(rawBody, BRIDGE_TOKEN);
+    if (!safeEqHex(got, exp)) {
+      return res.status(401).json({ ok: false, error: { code: 'INVALID_SIGNATURE', message: 'signature mismatch', retryable: false } });
+    }
+  }
+
+  cleanupChannelIdempotency();
+  const parsed = validateChannelInbound(req.body || {});
+  if (!parsed.ok) {
+    return res.status(400).json({ ok: false, requestId: String(req.body?.requestId || ''), error: { code: parsed.code, message: parsed.message, retryable: false } });
+  }
+
+  const cached = channelIdempotency.get(parsed.requestId);
+  if (cached) return res.json(cached.response);
+
+  // B8 stub routing: contract-ready hub ingress with explicit canary-safe error behavior.
+  if (!parsed.tenantChannelId) {
+    const out = {
+      ok: false,
+      requestId: parsed.requestId,
+      error: { code: 'TENANT_NOT_MAPPED', message: 'tenantChannelId missing', retryable: false },
+    };
+    channelIdempotency.set(parsed.requestId, { ts: Date.now(), response: out });
+    return res.status(404).json(out);
+  }
+
+  const out = {
+    ok: false,
+    requestId: parsed.requestId,
+    error: { code: 'EDGE_UNAVAILABLE', message: 'No active edge for tenant', retryable: true },
+  };
+  channelIdempotency.set(parsed.requestId, { ts: Date.now(), response: out });
+  return res.status(503).json(out);
+});
+
 app.post('/v1/inbound', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
 
