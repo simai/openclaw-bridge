@@ -13,9 +13,9 @@ const SMART_UPSTREAM_URL = process.env.SMART_UPSTREAM_URL || '';
 const SMART_UPSTREAM_TOKEN = process.env.SMART_UPSTREAM_TOKEN || '';
 const OPENCLAW_AGENT_TIMEOUT_MS = Number(process.env.OPENCLAW_AGENT_TIMEOUT_MS || 30000);
 const DB_ENABLED = String(process.env.DB_ENABLED || '1') === '1';
-const CONTEXT_SUMMARY_MAX_CHARS = Number(process.env.CONTEXT_SUMMARY_MAX_CHARS || 700);
-const CONTEXT_FACTS_MAX_ITEMS = Number(process.env.CONTEXT_FACTS_MAX_ITEMS || 6);
-const CONTEXT_FACT_VALUE_MAX_CHARS = Number(process.env.CONTEXT_FACT_VALUE_MAX_CHARS || 140);
+const CONTEXT_SUMMARY_MAX_CHARS = Number(process.env.CONTEXT_SUMMARY_MAX_CHARS || 500);
+const CONTEXT_FACTS_MAX_ITEMS = Number(process.env.CONTEXT_FACTS_MAX_ITEMS || 5);
+const CONTEXT_FACT_VALUE_MAX_CHARS = Number(process.env.CONTEXT_FACT_VALUE_MAX_CHARS || 120);
 
 let dbPool = null;
 let dbInitAttempted = false;
@@ -87,14 +87,25 @@ function trimTo(input, maxLen) {
 
 function sanitizeFacts(rawFacts) {
   if (!Array.isArray(rawFacts)) return [];
-  return rawFacts
-    .slice(0, Math.max(1, CONTEXT_FACTS_MAX_ITEMS))
-    .map((f) => ({
-      fact_key: trimTo(f?.fact_key || f?.key || '', 40),
-      fact_value: trimTo(f?.fact_value || f?.value || '', Math.max(40, CONTEXT_FACT_VALUE_MAX_CHARS)),
-      confidence: Number(f?.confidence || 0),
-    }))
-    .filter((f) => f.fact_key && f.fact_value);
+
+  const byKey = new Map();
+  for (const item of rawFacts) {
+    const fact = {
+      fact_key: trimTo(item?.fact_key || item?.key || '', 40),
+      fact_value: trimTo(item?.fact_value || item?.value || '', Math.max(40, CONTEXT_FACT_VALUE_MAX_CHARS)),
+      confidence: Number(item?.confidence || 0),
+    };
+    if (!fact.fact_key || !fact.fact_value) continue;
+
+    const prev = byKey.get(fact.fact_key);
+    if (!prev || fact.confidence >= prev.confidence) {
+      byKey.set(fact.fact_key, fact);
+    }
+  }
+
+  return Array.from(byKey.values())
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, Math.max(1, CONTEXT_FACTS_MAX_ITEMS));
 }
 
 function buildAugmentedMessage(payload = {}) {
